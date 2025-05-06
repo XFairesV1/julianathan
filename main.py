@@ -5,7 +5,10 @@ from datetime import datetime
 
 app = Flask(__name__, static_url_path='', static_folder='static')
 
-DATA_FILE = 'scores.json'
+STORAGE_PATH = os.environ.get('STORAGE_PATH', '/app/data')
+os.makedirs(STORAGE_PATH, exist_ok=True)
+
+DATA_FILE = os.path.join(STORAGE_PATH, 'scores.json')
 DATE_FORMAT = '%Y-%m-%d %H:%M:%S'  # Include time in the date format
 
 
