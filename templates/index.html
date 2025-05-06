@@ -228,18 +228,37 @@
         justify-content: center;
     }
 
-    .remove-point {
-        background-color: var(--accent-color);
-        color: white;
-        width: 36px;
-        height: 36px;
-        font-size: 1.2rem;
-    }
+/* Substitua toda a definição atual de .remove-point por esta: */
+.remove-point {
+    background-color: var(--accent-color);
+    color: white;
+    padding: 0.6rem 1rem;        /* dá espaço interno em vez de width/height fixos */
+    font-size: 1rem;            /* ajusta o tamanho do ícone/texto */
+    border-radius: 50px;        /* mantém a borda redonda */
+    display: inline-flex;       /* flex para centralizar o ícone */
+    align-items: center;
+    justify-content: center;
+    min-width: 36px;            /* largura mínima para não ficar muito estreito */
+    transition: var(--transition);
+}
 
-    .remove-point:hover {
-        background-color: #e25050;
-        transform: translateY(-2px);
+/* opcional: torne o hover mais suave */
+.remove-point:hover {
+    background-color: #e25050;
+    transform: translateY(-2px);
+}
+
+/* remova o override no @media (max-width: 480px) que faz height:auto */
+@media (max-width: 480px) {
+    /* com o padding acima não precisa mexer aqui */
+    /* apenas assegure que não haja height/width cruéis */
+    .remove-point {
+        width: auto !important;
+        height: auto !important;
+        padding: 0.6rem 1rem !important;
     }
+}
+
 
     .add-point {
         background-color: var(--primary-color);
