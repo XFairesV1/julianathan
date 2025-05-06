@@ -1,81 +1,65 @@
+# pip install Flask SQLAlchemy psycopg2-binary
+
 from flask import Flask, render_template, request, jsonify, send_from_directory
-import json
 import os
 from datetime import datetime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
+from sqlalchemy.orm import declarative_base, sessionmaker
 
+# ───── Flask app setup ─────────────────────────────────────────────────────────
 app = Flask(__name__, static_url_path='', static_folder='static')
 
-STORAGE_PATH = os.environ.get('STORAGE_PATH', '/app/data')
-os.makedirs(STORAGE_PATH, exist_ok=True)
+# ───── Database setup (PostgreSQL via Railway) ─────────────────────────────────
+DATABASE_URL = os.environ['DATABASE_URL']
+engine       = create_engine(DATABASE_URL, echo=False, future=True)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base         = declarative_base()
 
-DATA_FILE = os.path.join(STORAGE_PATH, 'scores.json')
-DATE_FORMAT = '%Y-%m-%d %H:%M:%S'  # Include time in the date format
+# ───── Models ───────────────────────────────────────────────────────────────────
+class Score(Base):
+    __tablename__ = 'scores'
+    id        = Column(Integer, primary_key=True, index=True)
+    player    = Column(String,  index=True, nullable=False)
+    game      = Column(String,  index=True, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
+class Reset(Base):
+    __tablename__ = 'resets'
+    id        = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-def load_data():
-    data = None
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            data = json.load(f)
-    else:
-        data = {
-            'total_scores': {
-                'jonathan-game1': 0, 'juliana-game1': 0,
-                'jonathan-game2': 0, 'juliana-game2': 0,
-                'jonathan-game3': 0, 'juliana-game3': 0
-            },
-            'daily_scores': {},
-            'last_reset_date': None
-        }
+# Cria as tabelas se não existirem
+Base.metadata.create_all(engine)
 
-    # Recalculate total_scores from daily_scores, considering last_reset_date
-    total_scores = {
-        'jonathan-game1': 0, 'juliana-game1': 0,
-        'jonathan-game2': 0, 'juliana-game2': 0,
-        'jonathan-game3': 0, 'juliana-game3': 0
-    }
-
-    last_reset_date_str = data.get('last_reset_date')
-    if last_reset_date_str:
-        last_reset_date = datetime.strptime(last_reset_date_str, DATE_FORMAT)
-    else:
-        last_reset_date = None
-
-    for date_str, scores in data['daily_scores'].items():
-        date_obj = datetime.strptime(date_str, DATE_FORMAT)
-        if last_reset_date is None or date_obj >= last_reset_date:
-            for key, value in scores.items():
-                total_scores[key] += value
-
-    data['total_scores'] = total_scores
-    return data
+# ───── Helper functions ─────────────────────────────────────────────────────────
+def get_last_reset_date():
+    sess = SessionLocal()
+    rst  = sess.query(Reset).order_by(Reset.timestamp.desc()).first()
+    sess.close()
+    return rst.timestamp if rst else None
 
 
-def save_data(data):
-    # Recalculate total_scores from daily_scores, considering last_reset_date
-    total_scores = {
-        'jonathan-game1': 0, 'juliana-game1': 0,
-        'jonathan-game2': 0, 'juliana-game2': 0,
-        'jonathan-game3': 0, 'juliana-game3': 0
-    }
+def get_total_scores():
+    sess       = SessionLocal()
+    last_reset = get_last_reset_date()
+    qry = sess.query(
+        Score.player,
+        Score.game,
+        func.count(Score.id).label('cnt')
+    )
+    if last_reset:
+        qry = qry.filter(Score.timestamp >= last_reset)
+    results = qry.group_by(Score.player, Score.game).all()
+    sess.close()
 
-    last_reset_date_str = data.get('last_reset_date')
-    if last_reset_date_str:
-        last_reset_date = datetime.strptime(last_reset_date_str, DATE_FORMAT)
-    else:
-        last_reset_date = None
+    # Monta o dicionário no formato esperado pelo front-end
+    scores = {f'{p}-{g}': cnt for p, g, cnt in results}
+    for p in ['jonathan','juliana']:
+        for g in ['game1','game2','game3']:
+            scores.setdefault(f'{p}-{g}', 0)
+    return scores
 
-    for date_str, scores in data['daily_scores'].items():
-        date_obj = datetime.strptime(date_str, DATE_FORMAT)
-        if last_reset_date is None or date_obj >= last_reset_date:
-            for key, value in scores.items():
-                total_scores[key] += value
-
-    data['total_scores'] = total_scores
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
-
-
+# ───── Endpoints ───────────────────────────────────────────────────────────────
 @app.route('/site.webmanifest')
 def serve_manifest():
     return send_from_directory('.', 'site.webmanifest', mimetype='application/manifest+json')
@@ -83,101 +67,85 @@ def serve_manifest():
 
 @app.route('/')
 def index():
-    # Display the total accumulated scores
-    data = load_data()
-    scores = data.get('total_scores', {
-        'jonathan-game1': 0, 'juliana-game1': 0,
-        'jonathan-game2': 0, 'juliana-game2': 0,
-        'jonathan-game3': 0, 'juliana-game3': 0
-    })
-    viewing_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    scores       = get_total_scores()
+    viewing_date = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
     return render_template('index.html', scores=scores, viewing_date=viewing_date)
 
 
 @app.route('/add_point', methods=['POST'])
 def add_point():
-    data = load_data()
     player = request.form['player']
-    game = request.form['game']
-    date = request.form.get('date', datetime.now().strftime(DATE_FORMAT))
+    game   = request.form['game']
 
-    # Update daily_scores
-    daily_scores = data.get('daily_scores', {})
-    if date not in daily_scores:
-        daily_scores[date] = {
-            'jonathan-game1': 0, 'juliana-game1': 0,
-            'jonathan-game2': 0, 'juliana-game2': 0,
-            'jonathan-game3': 0, 'juliana-game3': 0
-        }
-    key = f'{player}-{game}'
-    daily_scores[date][key] += 1
-    data['daily_scores'] = daily_scores
+    sess = SessionLocal()
+    sess.add(Score(player=player, game=game, timestamp=datetime.utcnow()))
+    sess.commit()
+    sess.close()
 
-    save_data(data)
-
-    total_player = sum(data['total_scores'].get(f'{player}-game{i}', 0) for i in range(1, 4))
-
-    return jsonify({'score': data['total_scores'][key], 'total_player': total_player})
+    totals     = get_total_scores()
+    key        = f'{player}-{game}'
+    total_user = sum(totals[f'{player}-game{i}'] for i in range(1,4))
+    return jsonify({'score': totals[key], 'total_player': total_user})
 
 
 @app.route('/remove_point', methods=['POST'])
 def remove_point():
-    data = load_data()
     player = request.form['player']
-    game = request.form['game']
-    date = request.form.get('date', datetime.now().strftime(DATE_FORMAT))
+    game   = request.form['game']
 
-    # Update daily_scores
-    daily_scores = data.get('daily_scores', {})
-    if date not in daily_scores:
-        return jsonify({'error': 'Nenhuma pontuação para esta data para remover.'}), 400
+    sess       = SessionLocal()
+    last_reset = get_last_reset_date()
+    qry = sess.query(Score).filter_by(player=player, game=game)
+    if last_reset:
+        qry = qry.filter(Score.timestamp >= last_reset)
+    to_delete = qry.order_by(Score.timestamp.desc()).first()
 
-    key = f'{player}-{game}'
-    if daily_scores[date][key] > 0:
-        daily_scores[date][key] -= 1
-        data['daily_scores'] = daily_scores
-        save_data(data)
-
-        total_player = sum(data['total_scores'].get(f'{player}-game{i}', 0) for i in range(1, 4))
-
-        return jsonify({'score': data['total_scores'][key], 'total_player': total_player})
-    else:
+    if not to_delete:
+        sess.close()
         return jsonify({'error': 'A pontuação não pode ser menor que zero.'}), 400
+
+    sess.delete(to_delete)
+    sess.commit()
+    sess.close()
+
+    totals     = get_total_scores()
+    key        = f'{player}-{game}'
+    total_user = sum(totals[f'{player}-game{i}'] for i in range(1,4))
+    return jsonify({'score': totals[key], 'total_player': total_user})
 
 
 @app.route('/reset_scores', methods=['POST'])
 def reset_scores():
-    data = load_data()
-    # Set the last reset date with time
-    data['last_reset_date'] = datetime.now().strftime(DATE_FORMAT)
-    save_data(data)
+    sess = SessionLocal()
+    sess.add(Reset(timestamp=datetime.utcnow()))
+    sess.commit()
+    sess.close()
     return jsonify({'status': 'success'})
 
 
 @app.route('/load_history', methods=['POST'])
 def load_history():
-    data = load_data()
-    date = request.form['date']
-    daily_scores = data.get('daily_scores', {})
+    date_str = request.form['date']  # formato 'YYYY-MM-DD'
+    date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+    start    = datetime.combine(date_obj, datetime.min.time())
+    end      = datetime.combine(date_obj, datetime.max.time())
 
-    # Initialize an empty score dictionary
-    aggregated_scores = {
-        'jonathan-game1': 0, 'juliana-game1': 0,
-        'jonathan-game2': 0, 'juliana-game2': 0,
-        'jonathan-game3': 0, 'juliana-game3': 0
-    }
+    sess    = SessionLocal()
+    results = (
+        sess.query(Score.player, Score.game, func.count(Score.id).label('cnt'))
+            .filter(Score.timestamp.between(start, end))
+            .group_by(Score.player, Score.game)
+            .all()
+    )
+    sess.close()
 
-    # Aggregate scores for the selected date
-    found = False
-    for date_str, score_data in daily_scores.items():
-        date_obj = datetime.strptime(date_str, DATE_FORMAT)
-        if date_obj.strftime('%Y-%m-%d') == date:
-            found = True
-            for key, value in score_data.items():
-                aggregated_scores[key] += value
+    scores = {f'{p}-{g}': cnt for p, g, cnt in results}
+    for p in ['jonathan','juliana']:
+        for g in ['game1','game2','game3']:
+            scores.setdefault(f'{p}-{g}', 0)
 
-    if found:
-        return jsonify({'scores': aggregated_scores})
+    if results:
+        return jsonify({'scores': scores})
     else:
         return jsonify({'error': 'Nenhum registro para esta data.'}), 404
 
